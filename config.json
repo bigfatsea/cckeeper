@@ -3,5 +3,5 @@
   "claudeCommand": "claude",
   "activationCommand": "1+1",
   "logLevel": "info",
-  "proxy": null
+  "proxy": "http://127.0.0.1:7890"
 }

@@ -49,7 +49,7 @@ class ClaudeKeeper {
     const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
     const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
     const prefix = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : 'ℹ️';
-    console.log(`[${timestamp}] ${prefix} ${message}`);
+    console.log(`[${timestamp}] ${prefix}  ${message}`);
   }
 
   // Get Claude config directories
@@ -214,15 +214,6 @@ class ClaudeKeeper {
 
   // Main execution logic
   run() {
-    console.log('\n\n\n');
-    this.log('info', 'Claude Block Keeper starting...');
-    
-    // Log proxy configuration
-    if (this.config.proxy) {
-      this.log('info', `Proxy configured: ${this.config.proxy}`);
-    } else {
-      this.log('verbose', 'No proxy configured');
-    }
     
     try {
       const activity = this.getLatestActivity();
@@ -295,9 +286,20 @@ More info: https://github.com/user/claude-keeper
 
   const keeper = new ClaudeKeeper();
   
+  console.log('\n\n\n');
+  
+  // Log proxy configuration (independent of force flag)
+  if (keeper.config.proxy) {
+    keeper.log('info', `🌐 Proxy configured: ${keeper.config.proxy}`);
+  } else {
+    keeper.log('verbose', 'No proxy configured');
+  }
+  
   if (args.includes('--force') || args.includes('-force') || args.includes('-f')) {
+    keeper.log('info', 'Claude Block Keeper starting (force mode)...');
     keeper.activateBlock();
   } else {
+    keeper.log('info', 'Claude Block Keeper starting...');
     keeper.run();
   }
 }

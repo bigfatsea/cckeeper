@@ -1,0 +1,7 @@
+{
+  "sessionDuration": 18000000,
+  "claudeCommand": "claude",
+  "activationCommand": "1+1",
+  "logLevel": "info",
+  "proxy": null
+}

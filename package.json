@@ -1,0 +1,34 @@
+{
+  "name": "claude-keeper",
+  "version": "1.0.0",
+  "description": "Keep Claude Code billing blocks active automatically",
+  "main": "claude-keeper",
+  "bin": {
+    "claude-keeper": "./claude-keeper"
+  },
+  "scripts": {
+    "test": "node claude-keeper --help",
+    "start": "node claude-keeper"
+  },
+  "keywords": [
+    "claude",
+    "automation",
+    "billing",
+    "cli",
+    "cron",
+    "scheduler"
+  ],
+  "author": "Claude Block Keeper Community",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/user/claude-keeper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/user/claude-keeper/issues"
+  },
+  "homepage": "https://github.com/user/claude-keeper#readme"
+}

@@ -1,0 +1,325 @@
+#!/usr/bin/env node
+
+/**
+ * Claude Block Keeper
+ * 
+ * Keep Claude Code billing blocks active automatically
+ * https://github.com/user/claude-keeper
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
+
+// Configuration defaults
+const DEFAULT_CONFIG = {
+  sessionDuration: 5 * 60 * 60 * 1000, // 5 hours in milliseconds
+  claudeCommand: 'claude',              // Claude CLI command
+  activationCommand: '1+1',             // Simple command to activate block
+  logLevel: 'info',                     // 'silent', 'info', 'verbose'
+  proxy: null                           // Proxy URL (e.g., 'http://proxy.company.com:8080')
+};
+
+class ClaudeKeeper {
+  constructor() {
+    this.config = this.loadConfig();
+  }
+
+  // Load configuration from config.json or use defaults
+  loadConfig() {
+    const configPath = path.join(__dirname, 'config.json');
+    if (fs.existsSync(configPath)) {
+      try {
+        const userConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        return { ...DEFAULT_CONFIG, ...userConfig };
+      } catch (err) {
+        this.log('warn', `Failed to load config.json: ${err.message}`);
+      }
+    }
+    return DEFAULT_CONFIG;
+  }
+
+  // Simple logging with timestamp
+  log(level, message) {
+    if (this.config.logLevel === 'silent') return;
+    if (level === 'verbose' && this.config.logLevel !== 'verbose') return;
+    
+    const now = new Date();
+    const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
+    const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
+    const prefix = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : 'ℹ️';
+    console.log(`[${timestamp}] ${prefix} ${message}`);
+  }
+
+  // Get Claude config directories
+  getClaudePaths() {
+    const paths = [];
+    
+    // Check environment variable
+    const envPaths = process.env.CLAUDE_CONFIG_DIR;
+    if (envPaths) {
+      envPaths.split(',').forEach(p => {
+        const trimmed = p.trim();
+        if (trimmed && fs.existsSync(path.join(trimmed, 'projects'))) {
+          paths.push(trimmed);
+        }
+      });
+    }
+    
+    // Default paths
+    const defaultPaths = [
+      path.join(os.homedir(), '.config', 'claude'),
+      path.join(os.homedir(), '.claude')
+    ];
+    
+    defaultPaths.forEach(p => {
+      if (fs.existsSync(path.join(p, 'projects')) && !paths.includes(p)) {
+        paths.push(p);
+      }
+    });
+    
+    return paths;
+  }
+
+  // Recursively find all JSONL files
+  findJsonlFiles(dir) {
+    const files = [];
+    
+    const walk = (currentPath) => {
+      try {
+        const items = fs.readdirSync(currentPath);
+        for (const item of items) {
+          const fullPath = path.join(currentPath, item);
+          const stat = fs.statSync(fullPath);
+          
+          if (stat.isDirectory()) {
+            walk(fullPath);
+          } else if (item.endsWith('.jsonl')) {
+            files.push(fullPath);
+          }
+        }
+      } catch (err) {
+        // Ignore permission errors
+      }
+    };
+    
+    walk(dir);
+    return files;
+  }
+
+  // Parse JSONL files to get latest activity
+  getLatestActivity() {
+    const claudePaths = this.getClaudePaths();
+    if (claudePaths.length === 0) {
+      this.log('verbose', 'No Claude config directories found');
+      return null;
+    }
+
+    // Find all JSONL files
+    const allJsonlFiles = [];
+    for (const claudePath of claudePaths) {
+      const projectsPath = path.join(claudePath, 'projects');
+      if (fs.existsSync(projectsPath)) {
+        const files = this.findJsonlFiles(projectsPath);
+        allJsonlFiles.push(...files);
+      }
+    }
+
+    if (allJsonlFiles.length === 0) {
+      this.log('verbose', 'No JSONL files found');
+      return null;
+    }
+
+    this.log('verbose', `Found ${allJsonlFiles.length} JSONL files in ${claudePaths.length} directories`);
+
+    // Parse files to find latest activity
+    let latestTime = null;
+    let latestEntry = null;
+    
+    for (const file of allJsonlFiles) {
+      try {
+        const content = fs.readFileSync(file, 'utf8');
+        const lines = content.trim().split('\n').filter(line => line);
+        
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+            if (data.timestamp) {
+              const time = new Date(data.timestamp);
+              if (!latestTime || time > latestTime) {
+                latestTime = time;
+                latestEntry = data;
+              }
+            }
+          } catch (err) {
+            // Ignore invalid JSON lines
+          }
+        }
+      } catch (err) {
+        // Ignore file read errors
+      }
+    }
+    
+    return latestTime ? { timestamp: latestTime.getTime(), data: latestEntry } : null;
+  }
+
+  // Activate new block by running Claude command
+  activateBlock() {
+    try {
+      this.log('info', '🚀 Activating new block...');
+      
+      const command = `${this.config.claudeCommand} --dangerously-skip-permissions "${this.config.activationCommand}"`;
+      this.log('verbose', `Executing command: ${command}`);
+      
+      // Prepare environment with proxy settings if configured
+      const env = { ...process.env };
+      if (this.config.proxy) {
+        env.HTTP_PROXY = this.config.proxy;
+        env.HTTPS_PROXY = this.config.proxy;
+        env.http_proxy = this.config.proxy;
+        env.https_proxy = this.config.proxy;
+        this.log('verbose', `Using proxy: ${this.config.proxy}`);
+      }
+      
+      const output = execSync(command, { 
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: 'pipe',
+        env: env
+      });
+      
+      // Show Claude command output if verbose or if there's actual content
+      if (this.config.logLevel === 'verbose' || (output && output.trim())) {
+        this.log('info', 'Claude command output:');
+        console.log(output);
+      }
+      
+      this.log('info', '✅ Block activated successfully');
+      return true;
+    } catch (err) {
+      this.log('error', `Failed to activate block: ${err.message}`);
+      // Show error output if available
+      if (err.stdout) {
+        this.log('error', 'Command stdout:');
+        console.log(err.stdout);
+      }
+      if (err.stderr) {
+        this.log('error', 'Command stderr:');
+        console.log(err.stderr);
+      }
+      return false;
+    }
+  }
+
+  // Main execution logic
+  run() {
+    console.log('\n\n\n');
+    this.log('info', 'Claude Block Keeper starting...');
+    
+    // Log proxy configuration
+    if (this.config.proxy) {
+      this.log('info', `Proxy configured: ${this.config.proxy}`);
+    } else {
+      this.log('verbose', 'No proxy configured');
+    }
+    
+    try {
+      const activity = this.getLatestActivity();
+      const now = Date.now();
+      
+      if (!activity) {
+        this.log('info', '❌ No activity found, activating new block');
+        this.activateBlock();
+        return;
+      }
+      
+      const timeSinceActivity = now - activity.timestamp;
+      const activityTime = new Date(activity.timestamp);
+      const utc8ActivityTime = new Date(activityTime.getTime() + (8 * 60 * 60 * 1000));
+      const timeString = utc8ActivityTime.toISOString().slice(11, 16);
+      
+      if (timeSinceActivity < this.config.sessionDuration) {
+        this.log('info', `✅ Block is active (last activity ${timeString})`);
+      } else {
+        this.log('info', `⏰ Block expired (last activity ${timeString}), activating new block`);
+        this.activateBlock();
+      }
+    } catch (err) {
+      this.log('error', `Execution failed: ${err.message}`);
+      process.exit(1);
+    }
+  }
+}
+
+// CLI interface
+function main() {
+  const args = process.argv.slice(2);
+  
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`
+Claude Block Keeper - Keep Claude Code blocks active
+
+Usage:
+  claude-keeper              Check and activate if needed
+  claude-keeper --force      Force activate new block
+  claude-keeper -force       Force activate new block (alternative)
+  claude-keeper -f           Force activate new block (short)
+  claude-keeper --help       Show this help
+  
+Configuration:
+  Create config.json in the same directory as this script.
+  
+  Example config.json:
+  {
+    "sessionDuration": 18000000,
+    "claudeCommand": "claude",
+    "activationCommand": "1+1",
+    "logLevel": "info",
+    "proxy": "http://proxy.company.com:8080"
+  }
+
+Installation:
+  1. Download: curl -O [raw-github-url]/claude-keeper
+  2. Make executable: chmod +x claude-keeper
+  3. Test: ./claude-keeper
+  4. Schedule: Add to crontab or Task Scheduler
+     
+     Linux/macOS: 30 * * * * /usr/bin/node /full/path/to/claude-keeper >/dev/null 2>&1
+     Windows: Use Task Scheduler to run every hour
+
+More info: https://github.com/user/claude-keeper
+`);
+    return;
+  }
+
+  const keeper = new ClaudeKeeper();
+  
+  if (args.includes('--force') || args.includes('-force') || args.includes('-f')) {
+    keeper.activateBlock();
+  } else {
+    keeper.run();
+  }
+}
+
+// Error handling
+process.on('uncaughtException', (err) => {
+  const now = new Date();
+  const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
+  const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
+  console.error(`[${timestamp}] ❌ Uncaught exception: ${err.message}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (err) => {
+  const now = new Date();
+  const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
+  const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
+  console.error(`[${timestamp}] ❌ Unhandled rejection: ${err}`);
+  process.exit(1);
+});
+
+// Run if executed directly
+if (require.main === module) {
+  main();
+}

@@ -4,6 +4,7 @@
  * Claude Block Keeper
  * 
  * Keep Claude Code billing blocks active automatically
+ * Now with proper session block detection matching ccusage logic
  * https://github.com/user/claude-keeper
  */
 
@@ -108,12 +109,19 @@ class ClaudeKeeper {
     return files;
   }
 
-  // Parse JSONL files to get latest activity
-  getLatestActivity() {
+  // Floor timestamp to the beginning of the hour
+  floorToHour(timestamp) {
+    const floored = new Date(timestamp);
+    floored.setUTCMinutes(0, 0, 0);
+    return floored;
+  }
+
+  // Parse JSONL files and identify session blocks
+  identifySessionBlocks() {
     const claudePaths = this.getClaudePaths();
     if (claudePaths.length === 0) {
       this.log('verbose', 'No Claude config directories found');
-      return null;
+      return [];
     }
 
     // Find all JSONL files
@@ -128,14 +136,14 @@ class ClaudeKeeper {
 
     if (allJsonlFiles.length === 0) {
       this.log('verbose', 'No JSONL files found');
-      return null;
+      return [];
     }
 
     this.log('verbose', `Found ${allJsonlFiles.length} JSONL files in ${claudePaths.length} directories`);
 
-    // Parse files to find latest activity
-    let latestTime = null;
-    let latestEntry = null;
+    // Collect all entries with timestamps
+    const entries = [];
+    const processedHashes = new Set();
     
     for (const file of allJsonlFiles) {
       try {
@@ -146,11 +154,24 @@ class ClaudeKeeper {
           try {
             const data = JSON.parse(line);
             if (data.timestamp) {
-              const time = new Date(data.timestamp);
-              if (!latestTime || time > latestTime) {
-                latestTime = time;
-                latestEntry = data;
+              // Create unique hash for deduplication
+              const uniqueHash = data.message?.id && data.requestId 
+                ? `${data.message.id}:${data.requestId}` 
+                : null;
+              
+              // Skip duplicates
+              if (uniqueHash && processedHashes.has(uniqueHash)) {
+                continue;
               }
+              
+              if (uniqueHash) {
+                processedHashes.add(uniqueHash);
+              }
+              
+              entries.push({
+                timestamp: new Date(data.timestamp),
+                data: data
+              });
             }
           } catch (err) {
             // Ignore invalid JSON lines
@@ -161,7 +182,83 @@ class ClaudeKeeper {
       }
     }
     
-    return latestTime ? { timestamp: latestTime.getTime(), data: latestEntry } : null;
+    if (entries.length === 0) {
+      return [];
+    }
+    
+    // Sort entries by timestamp
+    entries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    
+    // Identify session blocks
+    const blocks = [];
+    let currentBlockStart = null;
+    let currentBlockEntries = [];
+    
+    for (const entry of entries) {
+      if (!currentBlockStart) {
+        // First entry - start new block (floored to hour)
+        currentBlockStart = this.floorToHour(entry.timestamp);
+        currentBlockEntries = [entry];
+      } else {
+        const timeSinceBlockStart = entry.timestamp.getTime() - currentBlockStart.getTime();
+        const lastEntry = currentBlockEntries[currentBlockEntries.length - 1];
+        const timeSinceLastEntry = entry.timestamp.getTime() - lastEntry.timestamp.getTime();
+        
+        if (timeSinceBlockStart > this.config.sessionDuration || 
+            timeSinceLastEntry > this.config.sessionDuration) {
+          // Close current block
+          blocks.push({
+            startTime: currentBlockStart,
+            endTime: new Date(currentBlockStart.getTime() + this.config.sessionDuration),
+            entries: currentBlockEntries,
+            actualEndTime: currentBlockEntries[currentBlockEntries.length - 1].timestamp
+          });
+          
+          // Start new block (floored to hour)
+          currentBlockStart = this.floorToHour(entry.timestamp);
+          currentBlockEntries = [entry];
+        } else {
+          // Add to current block
+          currentBlockEntries.push(entry);
+        }
+      }
+    }
+    
+    // Close the last block
+    if (currentBlockStart && currentBlockEntries.length > 0) {
+      blocks.push({
+        startTime: currentBlockStart,
+        endTime: new Date(currentBlockStart.getTime() + this.config.sessionDuration),
+        entries: currentBlockEntries,
+        actualEndTime: currentBlockEntries[currentBlockEntries.length - 1].timestamp
+      });
+    }
+    
+    return blocks;
+  }
+  
+  // Check if current block is active
+  checkActiveBlock() {
+    const blocks = this.identifySessionBlocks();
+    if (blocks.length === 0) {
+      return null;
+    }
+    
+    const lastBlock = blocks[blocks.length - 1];
+    const now = new Date();
+    
+    // Block is active if:
+    // 1. Time since last activity < session duration
+    // 2. Current time < block end time
+    const timeSinceLastActivity = now.getTime() - lastBlock.actualEndTime.getTime();
+    const isActive = timeSinceLastActivity < this.config.sessionDuration && 
+                     now < lastBlock.endTime;
+    
+    return {
+      isActive,
+      lastBlock,
+      timeSinceLastActivity
+    };
   }
 
   // Activate new block by running Claude command
@@ -214,30 +311,114 @@ class ClaudeKeeper {
 
   // Main execution logic
   run() {
-    
     try {
-      const activity = this.getLatestActivity();
-      const now = Date.now();
+      const blockStatus = this.checkActiveBlock();
       
-      if (!activity) {
+      if (!blockStatus) {
         this.log('info', '❌ No activity found, activating new block');
         this.activateBlock();
         return;
       }
       
-      const timeSinceActivity = now - activity.timestamp;
-      const activityTime = new Date(activity.timestamp);
+      const { isActive, lastBlock, timeSinceLastActivity } = blockStatus;
+      
+      // Format times for display
+      const activityTime = lastBlock.actualEndTime;
       const utc8ActivityTime = new Date(activityTime.getTime() + (8 * 60 * 60 * 1000));
       const timeString = utc8ActivityTime.toISOString().slice(11, 16);
       
-      if (timeSinceActivity < this.config.sessionDuration) {
-        this.log('info', `✅ Block is active (last activity ${timeString})`);
+      const blockStartTime = lastBlock.startTime;
+      const utc8BlockStart = new Date(blockStartTime.getTime() + (8 * 60 * 60 * 1000));
+      const blockStartString = utc8BlockStart.toISOString().slice(11, 16);
+      
+      const blockEndTime = lastBlock.endTime;
+      const utc8BlockEnd = new Date(blockEndTime.getTime() + (8 * 60 * 60 * 1000));
+      const blockEndString = utc8BlockEnd.toISOString().slice(11, 16);
+      
+      // Calculate remaining time in block
+      const now = new Date();
+      const remainingTime = blockEndTime.getTime() - now.getTime();
+      const remainingMinutes = Math.max(0, Math.floor(remainingTime / (1000 * 60)));
+      
+      // Show block details in verbose mode
+      if (this.config.logLevel === 'verbose') {
+        this.log('verbose', `Block details:`);
+        this.log('verbose', `  Start time: ${blockStartTime.toISOString()}`);
+        this.log('verbose', `  End time: ${blockEndTime.toISOString()}`);
+        this.log('verbose', `  Last activity: ${activityTime.toISOString()}`);
+        this.log('verbose', `  Entries in block: ${lastBlock.entries.length}`);
+        this.log('verbose', `  Time since last activity: ${Math.floor(timeSinceLastActivity / (1000 * 60))} minutes`);
+      }
+      
+      if (isActive) {
+        this.log('info', `✅ Block is active (${blockStartString}-${blockEndString})`);
+        this.log('info', `   Last activity: ${timeString}, ${remainingMinutes} minutes remaining`);
       } else {
-        this.log('info', `⏰ Block expired (last activity ${timeString}), activating new block`);
+        // Determine why block is not active
+        if (now >= blockEndTime) {
+          this.log('info', `⏰ Block expired (${blockStartString}-${blockEndString} ended)`);
+        } else {
+          this.log('info', `⏰ Block inactive (no activity for ${Math.floor(timeSinceLastActivity / (1000 * 60))} minutes)`);
+        }
+        this.log('info', `   Last activity: ${timeString}, activating new block`);
         this.activateBlock();
       }
     } catch (err) {
       this.log('error', `Execution failed: ${err.message}`);
+      process.exit(1);
+    }
+  }
+  
+  // Show all session blocks
+  showBlocks() {
+    try {
+      const blocks = this.identifySessionBlocks();
+      
+      if (blocks.length === 0) {
+        this.log('info', 'No session blocks found');
+        return;
+      }
+      
+      this.log('info', `Found ${blocks.length} session block(s):`);
+      this.log('info', '');
+      
+      const now = new Date();
+      
+      blocks.forEach((block, index) => {
+        const blockNum = index + 1;
+        const startTime = block.startTime;
+        const endTime = block.endTime;
+        const actualEndTime = block.actualEndTime;
+        
+        // Format times
+        const utc8Start = new Date(startTime.getTime() + (8 * 60 * 60 * 1000));
+        const utc8End = new Date(endTime.getTime() + (8 * 60 * 60 * 1000));
+        const utc8ActualEnd = new Date(actualEndTime.getTime() + (8 * 60 * 60 * 1000));
+        
+        const startStr = utc8Start.toISOString().slice(0, 16).replace('T', ' ');
+        const endStr = utc8End.toISOString().slice(11, 16);
+        const lastActivityStr = utc8ActualEnd.toISOString().slice(11, 16);
+        
+        // Check if block is active
+        const timeSinceLastActivity = now.getTime() - actualEndTime.getTime();
+        const isActive = timeSinceLastActivity < this.config.sessionDuration && now < endTime;
+        
+        const status = isActive ? '✅ ACTIVE' : '⏹️  EXPIRED';
+        const entriesCount = block.entries.length;
+        
+        this.log('info', `Block #${blockNum}: ${startStr} - ${endStr} ${status}`);
+        this.log('info', `          Entries: ${entriesCount}, Last activity: ${lastActivityStr}`);
+        
+        if (isActive) {
+          const remainingTime = endTime.getTime() - now.getTime();
+          const remainingMinutes = Math.max(0, Math.floor(remainingTime / (1000 * 60)));
+          this.log('info', `          Remaining: ${remainingMinutes} minutes`);
+        }
+        
+        this.log('info', '');
+      });
+    } catch (err) {
+      this.log('error', `Failed to show blocks: ${err.message}`);
       process.exit(1);
     }
   }
@@ -256,6 +437,7 @@ Usage:
   claude-keeper --force      Force activate new block
   claude-keeper -force       Force activate new block (alternative)
   claude-keeper -f           Force activate new block (short)
+  claude-keeper --blocks     Show all session blocks
   claude-keeper --help       Show this help
   
 Configuration:
@@ -295,7 +477,10 @@ More info: https://github.com/user/claude-keeper
     keeper.log('verbose', 'No proxy configured');
   }
   
-  if (args.includes('--force') || args.includes('-force') || args.includes('-f')) {
+  if (args.includes('--blocks')) {
+    keeper.log('info', 'Claude Block Keeper - Session Blocks');
+    keeper.showBlocks();
+  } else if (args.includes('--force') || args.includes('-force') || args.includes('-f')) {
     keeper.log('info', 'Claude Block Keeper starting (force mode)...');
     keeper.activateBlock();
   } else {

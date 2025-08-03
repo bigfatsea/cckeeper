@@ -105,6 +105,11 @@ calculate_next_run() {
 
 # Run claude-keeper
 run_keeper() {
+    echo ""
+    echo ""
+    echo ""
+    echo ""
+
     log "Running claude-keeper..."
     cd "$SCRIPT_DIR"
     

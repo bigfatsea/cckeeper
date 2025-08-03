@@ -13,6 +13,54 @@ const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 
+// Helper function to normalize timezone format
+function normalizeTimezone(timezone) {
+  if (!timezone) return 'UTC+8';
+  const match = timezone.match(/^[Uu][Tt][Cc]([+-])(\d{1,2})$/);
+  if (match) {
+    const sign = match[1];
+    const hours = match[2].padStart(1, '0'); // Don't pad with leading zero for single digits
+    return `UTC${sign}${hours}`;
+  }
+  return 'UTC+8'; // Default fallback
+}
+
+// Helper function to parse timezone offset
+function parseTimezoneOffset(timezone) {
+  const normalized = normalizeTimezone(timezone);
+  const match = normalized.match(/^UTC([+-])(\d{1,2})$/);
+  if (match) {
+    const sign = match[1] === '+' ? 1 : -1;
+    const hours = parseInt(match[2], 10);
+    return sign * hours * 60 * 60 * 1000; // Convert to milliseconds
+  }
+  return 8 * 60 * 60 * 1000; // Default to UTC+8 if parsing fails
+}
+
+// Helper function to format timestamp with configurable timezone
+function formatTimestamp(date = new Date(), timezone = 'UTC+8') {
+  // const normalizedTimezone = normalizeTimezone(timezone);
+  const offset = parseTimezoneOffset(timezone);
+  const adjustedDate = new Date(date.getTime() + offset);
+  return adjustedDate.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+// Helper function to format time only with configurable timezone
+function formatTime(date, timezone = 'UTC+8') {
+  const offset = parseTimezoneOffset(timezone);
+  const adjustedDate = new Date(date.getTime() + offset);
+  return adjustedDate.toISOString().slice(11, 16); // HH:MM format
+}
+
+// Helper function to format date and time with configurable timezone
+function formatDateTime(date, timezone = 'UTC+8') {
+  const offset = parseTimezoneOffset(timezone);
+  const adjustedDate = new Date(date.getTime() + offset);
+  const dateStr = adjustedDate.toISOString().slice(0, 10); // YYYY-MM-DD
+  const timeStr = adjustedDate.toISOString().slice(11, 16); // HH:MM
+  return `${dateStr} ${timeStr}`;
+}
+
 // Configuration defaults
 const DEFAULT_CONFIG = {
   sessionDuration: 5 * 60 * 60 * 1000, // 5 hours in milliseconds
@@ -20,7 +68,8 @@ const DEFAULT_CONFIG = {
   activationCommand: '1+1',             // Simple command to activate block
   logLevel: 'info',                     // 'silent', 'info', 'verbose'
   proxy: null,                          // Proxy URL (e.g., 'http://proxy.company.com:8080')
-  forceMode: false                      // Always activate block without checking
+  forceMode: false,                     // Always activate block without checking
+  timezone: 'UTC+8'                     // Timezone for datetime formatting
 };
 
 class ClaudeKeeper {
@@ -42,14 +91,29 @@ class ClaudeKeeper {
     return DEFAULT_CONFIG;
   }
 
+  // Format timestamp with configurable timezone
+  formatTimestamp(date = new Date()) {
+    return formatTimestamp(date, this.config.timezone);
+  }
+
+  // Format time only with configurable timezone
+  formatTime(date) {
+    return formatTime(date, this.config.timezone);
+  }
+
+  // Format date and time with configurable timezone
+  formatDateTime(date) {
+    return formatDateTime(date, this.config.timezone);
+  }
+
   // Simple logging with timestamp
   log(level, message) {
     if (this.config.logLevel === 'silent') return;
     if (level === 'verbose' && this.config.logLevel !== 'verbose') return;
     
-    const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const timestamp = this.formatTimestamp();
     const prefix = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : 'ℹ️';
-    console.log(`[${timestamp}] ${prefix}  ${message}`);
+    console.log(`${timestamp} ${prefix}  ${message}`);
   }
 
   // Get Claude config directories
@@ -324,13 +388,13 @@ class ClaudeKeeper {
       
       // Format times for display
       const activityTime = lastBlock.actualEndTime;
-      const timeString = activityTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const timeString = this.formatTime(activityTime);
       
       const blockStartTime = lastBlock.startTime;
-      const blockStartString = blockStartTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const blockStartString = this.formatTime(blockStartTime);
       
       const blockEndTime = lastBlock.endTime;
-      const blockEndString = blockEndTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const blockEndString = this.formatTime(blockEndTime);
       
       // Calculate remaining time in block
       const now = new Date();
@@ -340,9 +404,9 @@ class ClaudeKeeper {
       // Show block details in verbose mode
       if (this.config.logLevel === 'verbose') {
         this.log('verbose', `Block details:`);
-        this.log('verbose', `  Start time: ${blockStartTime.toISOString()}`);
-        this.log('verbose', `  End time: ${blockEndTime.toISOString()}`);
-        this.log('verbose', `  Last activity: ${activityTime.toISOString()}`);
+        this.log('verbose', `  Start time: ${this.formatTimestamp(blockStartTime)}`);
+        this.log('verbose', `  End time: ${this.formatTimestamp(blockEndTime)}`);
+        this.log('verbose', `  Last activity: ${this.formatTimestamp(activityTime)}`);
         this.log('verbose', `  Entries in block: ${lastBlock.entries.length}`);
         this.log('verbose', `  Time since last activity: ${Math.floor(timeSinceLastActivity / (1000 * 60))} minutes`);
       }
@@ -388,12 +452,9 @@ class ClaudeKeeper {
         const actualEndTime = block.actualEndTime;
         
         // Format times
-        const startStr = startTime.toLocaleString('en-US', { 
-          year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', hour12: false
-        });
-        const endStr = endTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-        const lastActivityStr = actualEndTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        const startStr = this.formatDateTime(startTime);
+        const endStr = this.formatTime(endTime);
+        const lastActivityStr = this.formatTime(actualEndTime);
         
         // Check if block is active
         const timeSinceLastActivity = now.getTime() - actualEndTime.getTime();
@@ -445,7 +506,8 @@ Configuration:
     "activationCommand": "1+1",
     "logLevel": "info",
     "proxy": null,
-    "forceMode": false
+    "forceMode": false,
+    "timezone": "UTC+8"
   }
   
   Options:
@@ -455,6 +517,7 @@ Configuration:
   - logLevel: "silent", "info", or "verbose" (default: "info")
   - proxy: HTTP proxy URL (default: null)
   - forceMode: Always activate without checking (default: false)
+  - timezone: Timezone for datetime formatting, case insensitive (default: "UTC+8")
 
 Usage with daemon:
   1. Download: curl -O [raw-github-url]/claude-keeper
@@ -469,7 +532,7 @@ More info: https://github.com/user/claude-keeper
 
   const keeper = new ClaudeKeeper();
   
-  console.log('\n\n\n');
+  // console.log('\n\n\n');
   
   // Log proxy configuration (independent of force flag)
   if (keeper.config.proxy) {
@@ -496,15 +559,29 @@ More info: https://github.com/user/claude-keeper
   }
 }
 
+// Helper function to get timezone for error handlers
+function getTimezoneForErrors() {
+  try {
+    const configPath = path.join(__dirname, 'config.json');
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      return config.timezone || 'UTC+8';
+    }
+  } catch (err) {
+    // Ignore config read errors
+  }
+  return 'UTC+8';
+}
+
 // Error handling
 process.on('uncaughtException', (err) => {
-  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const timestamp = formatTimestamp(new Date(), getTimezoneForErrors());
   console.error(`[${timestamp}] ❌ Uncaught exception: ${err.message}`);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (err) => {
-  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const timestamp = formatTimestamp(new Date(), getTimezoneForErrors());
   console.error(`[${timestamp}] ❌ Unhandled rejection: ${err}`);
   process.exit(1);
 });

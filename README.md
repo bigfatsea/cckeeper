@@ -4,18 +4,20 @@
 
 ## What it does
 
-Claude Code bills in 5-hour blocks. This tool runs every hour and:
+Claude Code bills in 5-hour blocks. This tool runs on schedule and:
 1. **Checks** if you have an active billing block
 2. **Activates** a new block if none exists (uses ~5 tokens)
 3. **Prevents** billing gaps and maximizes your token usage
+4. **Runs intelligently** using cron-style scheduling (default: 30 minutes past midnight, 4am-11pm)
 
 ## Installation
 
 ### Step 1: Download
 ```bash
-# Download the script
+# Download the scripts
 curl -O https://raw.githubusercontent.com/user/claude-keeper/main/claude-keeper
-chmod +x claude-keeper
+curl -O https://raw.githubusercontent.com/user/claude-keeper/main/claude-keeper-daemon.sh
+chmod +x claude-keeper claude-keeper-daemon.sh
 ```
 
 ### Step 2: Test
@@ -25,28 +27,35 @@ chmod +x claude-keeper
 ./claude-keeper
 ```
 
-### Step 3: Schedule (choose your platform)
+### Step 3: Start the Daemon
+
+#### **macOS/Linux (Recommended)**
+```bash
+# Start the daemon in background
+nohup ./claude-keeper-daemon.sh &
+
+# Check if it's running
+ps aux | grep claude-keeper-daemon
+
+# View logs
+tail -f claude-keeper.log
+```
 
 #### **Windows**
-1. Open Task Scheduler (`Win+R` → `taskschd.msc`)
-2. Create Basic Task
-3. **Name**: Claude Block Keeper
-4. **Trigger**: Daily, repeat every 1 hour
-5. **Action**: Start program
-   - **Program**: `node`
-   - **Arguments**: `C:\full\path\to\claude-keeper`
-
-#### **macOS/Linux**
 ```bash
-# Get the full paths first
-which node
-realpath claude-keeper
+# Run the daemon (keep terminal open)
+.\claude-keeper-daemon.sh
 
-# Add to crontab
-crontab -e
+# Or create a scheduled task to run the daemon at startup
+```
 
-# Add this line (replace with your actual paths):
-30 * * * * /usr/bin/node /full/path/to/claude-keeper >/dev/null 2>&1
+#### **Auto-start on Login (Optional)**
+Add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
+```bash
+# Auto-start Claude Keeper daemon if not running
+if ! pgrep -f claude-keeper-daemon >/dev/null; then
+    cd /path/to/claude-keeper && nohup ./claude-keeper-daemon.sh &
+fi
 ```
 
 ## Configuration (Optional)
@@ -59,7 +68,9 @@ Create `config.json` next to the script:
   "claudeCommand": "claude",
   "activationCommand": "1+1",
   "logLevel": "info",
-  "proxy": null
+  "proxy": null,
+  "forceMode": false,
+  "schedule": "30 0,4-23 * * *"
 }
 ```
 
@@ -70,18 +81,35 @@ Create `config.json` next to the script:
 | `activationCommand` | Command to activate block | `"1+1"` |
 | `logLevel` | Logging level: `silent`, `info`, `verbose` | `"info"` |
 | `proxy` | Proxy URL for Claude CLI | `null` |
+| `forceMode` | Always activate without checking | `false` |
+| `schedule` | Cron expression for when to run | `"30 0,4-23 * * *"` |
+
+### Schedule Examples
+- `"30 0,4-23 * * *"` - At 30 minutes past midnight, 4am-11pm (default)
+- `"0 */2 * * *"` - Every 2 hours
+- `"0 9-17 * * 1-5"` - Every hour, 9am-5pm, Monday-Friday
+- `"*/30 * * * *"` - Every 30 minutes
 
 ## Usage
 
 ```bash
-# Normal operation (check and activate if needed)
+# Manual operation (check and activate if needed)
 ./claude-keeper
 
 # Force activate new block
 ./claude-keeper --force
 
+# Show current blocks
+./claude-keeper --blocks
+
 # Show help
 ./claude-keeper --help
+
+# Daemon management
+nohup ./claude-keeper-daemon.sh &  # Start daemon
+pkill -f claude-keeper-daemon      # Stop daemon
+ps aux | grep claude-keeper-daemon  # Check status
+tail -f claude-keeper.log          # View logs
 ```
 
 ## Proxy Support
@@ -107,27 +135,30 @@ When configured, the script automatically sets `HTTP_PROXY` and `HTTPS_PROXY` en
 - Install [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) first
 - Or set full path in config: `"claudeCommand": "/full/path/to/claude"`
 
-### **Cron not working**
+### **Daemon not starting**
 ```bash
-# 1. Use full paths (no ~/ or relative paths)
-which node          # Use this full path
-realpath claude-keeper  # Use this full path
+# 1. Test claude-keeper manually first
+./claude-keeper
 
-# 2. Test manually first
-/usr/bin/node /full/path/to/claude-keeper
+# 2. Check if daemon is running
+ps aux | grep claude-keeper-daemon
 
-# 3. Check cron logs (macOS)
-log show --predicate 'process == "cron"' --last 1h
+# 3. Check daemon logs
+tail -f claude-keeper.log
+
+# 4. Start daemon with explicit output
+./claude-keeper-daemon.sh  # Run in foreground to see errors
 ```
 
-### **Windows Task not working**
-- Use full paths in Task Scheduler (no relative paths)
-- Test in Command Prompt first: `node C:\full\path\to\claude-keeper`
-- Ensure Node.js is in system PATH
+### **Authentication issues (macOS)**
+- The daemon runs in your user context with full keychain access
+- If prompted for keychain access, click "Always Allow"
+- Ensure you're logged in when starting the daemon
 
-### **Permission issues (macOS)**
-1. **System Preferences** → **Security & Privacy** → **Privacy**
-2. **Full Disk Access** → Add `cron` and your terminal app
+### **Schedule not working**
+- Check your cron expression syntax: `"schedule": "minute hour day month weekday"`
+- Test with a simple schedule: `"*/5 * * * *"` (every 5 minutes)
+- View daemon logs to see calculated next run times: `tail -f claude-keeper.log`
 
 ### **Proxy not working**
 - Verify proxy URL format: `http://host:port` or `https://host:port`
@@ -137,34 +168,37 @@ log show --predicate 'process == "cron"' --last 1h
 
 ## How it works
 
-- 🚀 **Simple**: Single file, ~200 lines of code
+- 🚀 **Simple**: Two scripts, intelligent scheduling
 - ⚡ **Efficient**: Uses only ~5 tokens per activation
-- 🔒 **Reliable**: No environment dependencies
+- 🔒 **Reliable**: Runs in user context with full keychain access
 - 🌍 **Cross-platform**: Windows, macOS, Linux
 - 📖 **Transparent**: Manual setup, you control everything
+- ⏰ **Smart**: Cron-style scheduling with automatic sleep calculations
 
 ## Project Structure
 
 ```
 claude-keeper/
-├── README.md              # This file
-├── LICENSE                # MIT license
-├── claude-keeper          # Main executable (~200 lines)
-├── package.json           # NPM metadata
-├── config.example.json    # Configuration example
-└── .gitignore            # Git ignore rules
+├── README.md                    # This file
+├── README.zh.md                 # Chinese documentation
+├── LICENSE                      # MIT license
+├── claude-keeper                # Main logic (~200 lines)
+├── claude-keeper-daemon.sh      # Smart daemon with cron scheduling
+├── config.json                  # Configuration file
+└── .gitignore                  # Git ignore rules
 ```
 
-## Why manual setup?
+## Why this approach?
 
-**Manual setup is better than automated complexity:**
+**Smart daemon design beats complex installation:**
 
-✅ **Transparent** - You know exactly what's happening  
-✅ **Reliable** - Fewer failure points and dependencies  
-✅ **Customizable** - Set your own schedule and paths  
-✅ **Debuggable** - Easy to test and troubleshoot  
+✅ **No system dependencies** - Runs in your user context  
+✅ **No keychain issues** - Full access to authentication  
+✅ **No cron complexity** - Built-in intelligent scheduling  
+✅ **Easy debugging** - Clear logs and simple process management  
+✅ **Customizable schedule** - Use any cron expression  
 
-❌ **Automated** - Complex, fragile, platform-specific  
+❌ **System scheduling** - Complex permissions and environment setup  
 
 ## Contributing
 

@@ -3,5 +3,7 @@
   "claudeCommand": "claude",
   "activationCommand": "1+1",
   "logLevel": "info",
-  "proxy": "http://127.0.0.1:7890"
+  "proxy": "http://127.0.0.1:7890",
+  "forceMode": false,
+  "schedule": "30 0,4-23 * * *"
 }

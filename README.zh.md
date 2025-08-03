@@ -4,10 +4,11 @@
 
 ## 功能介绍
 
-Claude Code 按 5 小时为一个计费块。这个工具每小时运行一次：
+Claude Code 按 5 小时为一个计费块。这个工具按计划运行：
 1. **检查** 是否有活跃的计费块
 2. **激活** 新块（如果没有活跃块）（仅使用约 5 个 token）
 3. **防止** 计费间隔，最大化您的 token 使用效率
+4. **智能运行** 使用 cron 风格调度（默认：凌晨及4am-11pm的30分）
 
 ## 安装步骤
 
@@ -15,7 +16,8 @@ Claude Code 按 5 小时为一个计费块。这个工具每小时运行一次�
 ```bash
 # 下载脚本
 curl -O https://raw.githubusercontent.com/user/claude-keeper/main/claude-keeper
-chmod +x claude-keeper
+curl -O https://raw.githubusercontent.com/user/claude-keeper/main/claude-keeper-daemon.sh
+chmod +x claude-keeper claude-keeper-daemon.sh
 ```
 
 ### 步骤 2：测试
@@ -25,28 +27,35 @@ chmod +x claude-keeper
 ./claude-keeper
 ```
 
-### 步骤 3：设置定时任务（选择您的平台）
+### 步骤 3：启动守护进程
+
+#### **macOS/Linux（推荐）**
+```bash
+# 在后台启动守护进程
+nohup ./claude-keeper-daemon.sh &
+
+# 检查是否正在运行
+ps aux | grep claude-keeper-daemon
+
+# 查看日志
+tail -f claude-keeper.log
+```
 
 #### **Windows**
-1. 打开任务计划程序（`Win+R` → `taskschd.msc`）
-2. 创建基本任务
-3. **名称**：Claude Block Keeper
-4. **触发器**：每日，每 1 小时重复一次
-5. **操作**：启动程序
-   - **程序**：`node`
-   - **参数**：`C:\完整\路径\到\claude-keeper`
-
-#### **macOS/Linux**
 ```bash
-# 首先获取完整路径
-which node
-realpath claude-keeper
+# 运行守护进程（保持终端打开）
+.\claude-keeper-daemon.sh
 
-# 添加到 crontab
-crontab -e
+# 或创建定时任务在启动时运行守护进程
+```
 
-# 添加以下行（替换为您的实际路径）：
-30 * * * * /usr/bin/node /完整/路径/到/claude-keeper >/dev/null 2>&1
+#### **开机自启动（可选）**
+添加到您的 shell 配置文件（`~/.zshrc`、`~/.bashrc` 等）：
+```bash
+# 如果守护进程未运行则自动启动
+if ! pgrep -f claude-keeper-daemon >/dev/null; then
+    cd /path/to/claude-keeper && nohup ./claude-keeper-daemon.sh &
+fi
 ```
 
 ## 配置（可选）
@@ -59,7 +68,9 @@ crontab -e
   "claudeCommand": "claude",
   "activationCommand": "1+1",
   "logLevel": "info",
-  "proxy": null
+  "proxy": null,
+  "forceMode": false,
+  "schedule": "30 0,4-23 * * *"
 }
 ```
 
@@ -70,18 +81,35 @@ crontab -e
 | `activationCommand` | 激活块的命令 | `"1+1"` |
 | `logLevel` | 日志级别：`silent`、`info`、`verbose` | `"info"` |
 | `proxy` | Claude CLI 的代理 URL | `null` |
+| `forceMode` | 始终激活而不检查 | `false` |
+| `schedule` | 运行时间的 Cron 表达式 | `"30 0,4-23 * * *"` |
+
+### 调度示例
+- `"30 0,4-23 * * *"` - 凌晨30分、4am-11pm的30分（默认）
+- `"0 */2 * * *"` - 每2小时
+- `"0 9-17 * * 1-5"` - 每小时，9am-5pm，周一到周五
+- `"*/30 * * * *"` - 每30分钟
 
 ## 使用方法
 
 ```bash
-# 正常运行（检查并在需要时激活）
+# 手动运行（检查并在需要时激活）
 ./claude-keeper
 
 # 强制激活新块
 ./claude-keeper --force
 
+# 显示当前块状态
+./claude-keeper --blocks
+
 # 显示帮助
 ./claude-keeper --help
+
+# 守护进程管理
+nohup ./claude-keeper-daemon.sh &  # 启动守护进程
+pkill -f claude-keeper-daemon      # 停止守护进程
+ps aux | grep claude-keeper-daemon  # 检查状态
+tail -f claude-keeper.log          # 查看日志
 ```
 
 ## 代理支持
@@ -107,27 +135,30 @@ crontab -e
 - 首先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - 或在配置中设置完整路径：`"claudeCommand": "/完整/路径/到/claude"`
 
-### **Cron 无法工作**
+### **守护进程无法工作**
 ```bash
-# 1. 使用完整路径（不要使用 ~/ 或相对路径）
-which node              # 使用这个完整路径
-realpath claude-keeper  # 使用这个完整路径
+# 1. 先手动测试 claude-keeper
+./claude-keeper
 
-# 2. 先手动测试
-/usr/bin/node /完整/路径/到/claude-keeper
+# 2. 检查守护进程是否运行
+ps aux | grep claude-keeper-daemon
 
-# 3. 检查 cron 日志（macOS）
-log show --predicate 'process == "cron"' --last 1h
+# 3. 查看守护进程日志
+tail -f claude-keeper.log
+
+# 4. 在前台运行守护进程以查看错误
+./claude-keeper-daemon.sh
 ```
 
-### **Windows 任务无法工作**
-- 在任务计划程序中使用完整路径（不要使用相对路径）
-- 先在命令提示符中测试：`node C:\完整\路径\到\claude-keeper`
-- 确保 Node.js 在系统 PATH 中
+### **认证问题（macOS）**
+- 守护进程在您的用户上下文中运行，具有完整的钥匙串访问权限
+- 如果提示钥匙串访问，请点击“始终允许”
+- 确保在启动守护进程时您已登录
 
-### **权限问题（macOS）**
-1. **系统偏好设置** → **安全性与隐私** → **隐私**
-2. **完全磁盘访问权限** → 添加 `cron` 和您的终端应用
+### **调度无法工作**
+- 检查您的 cron 表达式语法：`"schedule": "minute hour day month weekday"`
+- 使用简单调度测试：`"*/5 * * * *"`（每5分钟）
+- 查看守护进程日志以查看计算的下次运行时间：`tail -f claude-keeper.log`
 
 ### **代理无法工作**
 - 验证代理 URL 格式：`http://host:port` 或 `https://host:port`
@@ -147,12 +178,12 @@ log show --predicate 'process == "cron"' --last 1h
 
 ```
 claude-keeper/
-├── README.md              # 本文件
-├── README.zh.md           # 中文文档
+├── README.md              # 英文文档
+├── README.zh.md           # 本文件
 ├── LICENSE                # MIT 许可证
 ├── claude-keeper          # 主执行文件（约200行）
-├── package.json           # NPM 元数据
-├── config.example.json    # 配置示例
+├── claude-keeper-daemon.sh # 智能守护进程
+├── config.json            # 配置文件
 └── .gitignore            # Git 忽略规则
 ```
 

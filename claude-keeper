@@ -19,7 +19,8 @@ const DEFAULT_CONFIG = {
   claudeCommand: 'claude',              // Claude CLI command
   activationCommand: '1+1',             // Simple command to activate block
   logLevel: 'info',                     // 'silent', 'info', 'verbose'
-  proxy: null                           // Proxy URL (e.g., 'http://proxy.company.com:8080')
+  proxy: null,                          // Proxy URL (e.g., 'http://proxy.company.com:8080')
+  forceMode: false                      // Always activate block without checking
 };
 
 class ClaudeKeeper {
@@ -46,9 +47,7 @@ class ClaudeKeeper {
     if (this.config.logLevel === 'silent') return;
     if (level === 'verbose' && this.config.logLevel !== 'verbose') return;
     
-    const now = new Date();
-    const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
-    const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
+    const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const prefix = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : 'ℹ️';
     console.log(`[${timestamp}] ${prefix}  ${message}`);
   }
@@ -266,10 +265,10 @@ class ClaudeKeeper {
     try {
       this.log('info', '🚀 Activating new block...');
       
-      const command = `${this.config.claudeCommand} --dangerously-skip-permissions "${this.config.activationCommand}"`;
+      const command = `${this.config.claudeCommand} "${this.config.activationCommand}"`;
       this.log('verbose', `Executing command: ${command}`);
       
-      // Prepare environment with proxy settings if configured
+      // Set up environment with proxy if configured
       const env = { ...process.env };
       if (this.config.proxy) {
         env.HTTP_PROXY = this.config.proxy;
@@ -296,6 +295,7 @@ class ClaudeKeeper {
       return true;
     } catch (err) {
       this.log('error', `Failed to activate block: ${err.message}`);
+      
       // Show error output if available
       if (err.stdout) {
         this.log('error', 'Command stdout:');
@@ -324,16 +324,13 @@ class ClaudeKeeper {
       
       // Format times for display
       const activityTime = lastBlock.actualEndTime;
-      const utc8ActivityTime = new Date(activityTime.getTime() + (8 * 60 * 60 * 1000));
-      const timeString = utc8ActivityTime.toISOString().slice(11, 16);
+      const timeString = activityTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
       
       const blockStartTime = lastBlock.startTime;
-      const utc8BlockStart = new Date(blockStartTime.getTime() + (8 * 60 * 60 * 1000));
-      const blockStartString = utc8BlockStart.toISOString().slice(11, 16);
+      const blockStartString = blockStartTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
       
       const blockEndTime = lastBlock.endTime;
-      const utc8BlockEnd = new Date(blockEndTime.getTime() + (8 * 60 * 60 * 1000));
-      const blockEndString = utc8BlockEnd.toISOString().slice(11, 16);
+      const blockEndString = blockEndTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
       
       // Calculate remaining time in block
       const now = new Date();
@@ -391,13 +388,12 @@ class ClaudeKeeper {
         const actualEndTime = block.actualEndTime;
         
         // Format times
-        const utc8Start = new Date(startTime.getTime() + (8 * 60 * 60 * 1000));
-        const utc8End = new Date(endTime.getTime() + (8 * 60 * 60 * 1000));
-        const utc8ActualEnd = new Date(actualEndTime.getTime() + (8 * 60 * 60 * 1000));
-        
-        const startStr = utc8Start.toISOString().slice(0, 16).replace('T', ' ');
-        const endStr = utc8End.toISOString().slice(11, 16);
-        const lastActivityStr = utc8ActualEnd.toISOString().slice(11, 16);
+        const startStr = startTime.toLocaleString('en-US', { 
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false
+        });
+        const endStr = endTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        const lastActivityStr = actualEndTime.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
         
         // Check if block is active
         const timeSinceLastActivity = now.getTime() - actualEndTime.getTime();
@@ -435,7 +431,6 @@ Claude Block Keeper - Keep Claude Code blocks active
 Usage:
   claude-keeper              Check and activate if needed
   claude-keeper --force      Force activate new block
-  claude-keeper -force       Force activate new block (alternative)
   claude-keeper -f           Force activate new block (short)
   claude-keeper --blocks     Show all session blocks
   claude-keeper --help       Show this help
@@ -449,17 +444,23 @@ Configuration:
     "claudeCommand": "claude",
     "activationCommand": "1+1",
     "logLevel": "info",
-    "proxy": "http://proxy.company.com:8080"
+    "proxy": null,
+    "forceMode": false
   }
+  
+  Options:
+  - sessionDuration: Block duration in milliseconds (default: 5 hours)
+  - claudeCommand: Path to claude command (default: "claude")
+  - activationCommand: Command to activate block (default: "1+1")
+  - logLevel: "silent", "info", or "verbose" (default: "info")
+  - proxy: HTTP proxy URL (default: null)
+  - forceMode: Always activate without checking (default: false)
 
-Installation:
+Usage with daemon:
   1. Download: curl -O [raw-github-url]/claude-keeper
-  2. Make executable: chmod +x claude-keeper
+  2. Make executable: chmod +x claude-keeper claude-keeper-daemon.sh
   3. Test: ./claude-keeper
-  4. Schedule: Add to crontab or Task Scheduler
-     
-     Linux/macOS: 30 * * * * /usr/bin/node /full/path/to/claude-keeper >/dev/null 2>&1
-     Windows: Use Task Scheduler to run every hour
+  4. Start daemon: nohup ./claude-keeper-daemon.sh &
 
 More info: https://github.com/user/claude-keeper
 `);
@@ -480,28 +481,30 @@ More info: https://github.com/user/claude-keeper
   if (args.includes('--blocks')) {
     keeper.log('info', 'Claude Block Keeper - Session Blocks');
     keeper.showBlocks();
-  } else if (args.includes('--force') || args.includes('-force') || args.includes('-f')) {
-    keeper.log('info', 'Claude Block Keeper starting (force mode)...');
-    keeper.activateBlock();
   } else {
-    keeper.log('info', 'Claude Block Keeper starting...');
-    keeper.run();
+    // Check if force mode is enabled via CLI flags or config
+    const forceFromCLI = args.includes('--force') || args.includes('-f');
+    const forceMode = forceFromCLI || keeper.config.forceMode;
+    
+    if (forceMode) {
+      keeper.log('info', 'Claude Block Keeper starting (force mode)...');
+      keeper.activateBlock();
+    } else {
+      keeper.log('info', 'Claude Block Keeper starting...');
+      keeper.run();
+    }
   }
 }
 
 // Error handling
 process.on('uncaughtException', (err) => {
-  const now = new Date();
-  const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
-  const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   console.error(`[${timestamp}] ❌ Uncaught exception: ${err.message}`);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (err) => {
-  const now = new Date();
-  const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
-  const timestamp = utc8Time.toISOString().slice(0, 19).replace('T', ' ');
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   console.error(`[${timestamp}] ❌ Unhandled rejection: ${err}`);
   process.exit(1);
 });

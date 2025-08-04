@@ -3,9 +3,15 @@
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 CONFIG_FILE="$SCRIPT_DIR/config.json"
+LOG_DIR="$HOME/logs"
 
 # Default schedule if config.json doesn't exist or has no schedule
 DEFAULT_SCHEDULE="30 0,4-23 * * *"
+
+# Create log directory if it doesn't exist
+if [[ ! -d "$LOG_DIR" ]]; then
+    mkdir -p "$LOG_DIR"
+fi
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [DAEMON] $1"

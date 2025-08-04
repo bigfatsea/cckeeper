@@ -1,0 +1,750 @@
+#!/usr/bin/env node
+
+/**
+ * CC Keeper - Combined Claude Code Block Keeper & Daemon
+ * 
+ * Keep Claude Code billing blocks active automatically
+ * Now with integrated daemon mode and cron scheduling
+ * https://github.com/user/cckeeper
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
+const cronParser = require('cron-parser');
+
+// Configuration defaults
+const DEFAULT_CONFIG = {
+  sessionDuration: 300,                 // 5 hours in minutes
+  claudeCommand: 'claude --model Sonnet',              // Claude CLI command
+  activationCommand: '1+1',             // Simple command to activate block
+  logLevel: 'info',                     // 'silent', 'info', 'verbose'
+  proxy: null,                          // Proxy URL (e.g., 'http://proxy.company.com:8080')
+  forceMode: false,                     // Always activate block without checking
+  schedule: '30 0,4-23 * * *'          // Default cron schedule
+};
+
+class ClaudeKeeper {
+  constructor(args = []) {
+    this.config = this.loadConfig(args);
+  }
+
+  // Load configuration from command line arguments or use defaults
+  loadConfig(args = []) {
+    const config = { ...DEFAULT_CONFIG };
+    
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      const nextArg = args[i + 1];
+      
+      switch (arg) {
+        case '--session-duration':
+          if (nextArg && !isNaN(nextArg)) {
+            config.sessionDuration = parseInt(nextArg);
+            i++;
+          }
+          break;
+        case '--claude-command':
+          if (nextArg) {
+            config.claudeCommand = nextArg;
+            i++;
+          }
+          break;
+        case '--activation-command':
+          if (nextArg) {
+            config.activationCommand = nextArg;
+            i++;
+          }
+          break;
+        case '--log-level':
+          if (nextArg && ['silent', 'info', 'verbose'].includes(nextArg)) {
+            config.logLevel = nextArg;
+            i++;
+          }
+          break;
+        case '--proxy':
+          if (nextArg) {
+            config.proxy = nextArg;
+            i++;
+          }
+          break;
+        case '--schedule':
+          if (nextArg) {
+            // Validate cron expression
+            if (!CronScheduler.isValidCron(nextArg)) {
+              console.error(`Error: Invalid cron expression: ${nextArg}`);
+              process.exit(1);
+            }
+            config.schedule = nextArg;
+            i++;
+          }
+          break;
+      }
+    }
+    
+    // Convert session duration from minutes to milliseconds for internal use
+    config.sessionDurationMs = config.sessionDuration * 60 * 1000;
+    
+    return config;
+  }
+
+  // Format timestamp using system default timezone
+  formatTimestamp(date = new Date()) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  }
+
+  // Format time only using system default timezone
+  formatTime(date) {
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  }
+
+  // Format date and time using system default timezone
+  formatDateTime(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+  }
+
+  // Simple logging with timestamp
+  log(level, message) {
+    if (this.config.logLevel === 'silent') return;
+    if (level === 'verbose' && this.config.logLevel !== 'verbose') return;
+    
+    const timestamp = this.formatTimestamp();
+    console.log(`${timestamp} ${message}`);
+  }
+
+  // Get Claude config directories
+  getClaudePaths() {
+    const paths = [];
+    
+    // Check environment variable
+    const envPaths = process.env.CLAUDE_CONFIG_DIR;
+    if (envPaths) {
+      envPaths.split(',').forEach(p => {
+        const trimmed = p.trim();
+        if (trimmed && fs.existsSync(path.join(trimmed, 'projects'))) {
+          paths.push(trimmed);
+        }
+      });
+    }
+    
+    // Default paths
+    const defaultPaths = [
+      path.join(os.homedir(), '.config', 'claude'),
+      path.join(os.homedir(), '.claude')
+    ];
+    
+    defaultPaths.forEach(p => {
+      if (fs.existsSync(path.join(p, 'projects')) && !paths.includes(p)) {
+        paths.push(p);
+      }
+    });
+    
+    return paths;
+  }
+
+  // Recursively find all JSONL files
+  findJsonlFiles(dir) {
+    const files = [];
+    
+    const walk = (currentPath) => {
+      try {
+        const items = fs.readdirSync(currentPath);
+        for (const item of items) {
+          const fullPath = path.join(currentPath, item);
+          const stat = fs.statSync(fullPath);
+          
+          if (stat.isDirectory()) {
+            walk(fullPath);
+          } else if (item.endsWith('.jsonl')) {
+            files.push(fullPath);
+          }
+        }
+      } catch (err) {
+        // Ignore permission errors
+      }
+    };
+    
+    walk(dir);
+    return files;
+  }
+
+  // Floor timestamp to the beginning of the hour
+  floorToHour(timestamp) {
+    const floored = new Date(timestamp);
+    floored.setUTCMinutes(0, 0, 0);
+    return floored;
+  }
+
+  // Parse JSONL files and identify session blocks
+  identifySessionBlocks() {
+    const claudePaths = this.getClaudePaths();
+    if (claudePaths.length === 0) {
+      this.log('verbose', 'No Claude config directories found');
+      return [];
+    }
+
+    // Find all JSONL files
+    const allJsonlFiles = [];
+    for (const claudePath of claudePaths) {
+      const projectsPath = path.join(claudePath, 'projects');
+      if (fs.existsSync(projectsPath)) {
+        const files = this.findJsonlFiles(projectsPath);
+        allJsonlFiles.push(...files);
+      }
+    }
+
+    if (allJsonlFiles.length === 0) {
+      this.log('verbose', 'No JSONL files found');
+      return [];
+    }
+
+    this.log('verbose', `Found ${allJsonlFiles.length} JSONL files in ${claudePaths.length} directories`);
+
+    // Collect all entries with timestamps
+    const entries = [];
+    const processedHashes = new Set();
+    
+    for (const file of allJsonlFiles) {
+      try {
+        const content = fs.readFileSync(file, 'utf8');
+        const lines = content.trim().split('\n').filter(line => line);
+        
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+            if (data.timestamp) {
+              // Create unique hash for deduplication
+              const uniqueHash = data.message?.id && data.requestId 
+                ? `${data.message.id}:${data.requestId}` 
+                : null;
+              
+              // Skip duplicates
+              if (uniqueHash && processedHashes.has(uniqueHash)) {
+                continue;
+              }
+              
+              if (uniqueHash) {
+                processedHashes.add(uniqueHash);
+              }
+              
+              entries.push({
+                timestamp: new Date(data.timestamp),
+                data: data
+              });
+            }
+          } catch (err) {
+            // Ignore invalid JSON lines
+          }
+        }
+      } catch (err) {
+        // Ignore file read errors
+      }
+    }
+    
+    if (entries.length === 0) {
+      return [];
+    }
+    
+    // Sort entries by timestamp
+    entries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    
+    // Identify session blocks
+    const blocks = [];
+    let currentBlockStart = null;
+    let currentBlockEntries = [];
+    
+    for (const entry of entries) {
+      if (!currentBlockStart) {
+        // First entry - start new block (floored to hour)
+        currentBlockStart = this.floorToHour(entry.timestamp);
+        currentBlockEntries = [entry];
+      } else {
+        const timeSinceBlockStart = entry.timestamp.getTime() - currentBlockStart.getTime();
+        const lastEntry = currentBlockEntries[currentBlockEntries.length - 1];
+        const timeSinceLastEntry = entry.timestamp.getTime() - lastEntry.timestamp.getTime();
+        
+        if (timeSinceBlockStart > this.config.sessionDurationMs || 
+            timeSinceLastEntry > this.config.sessionDurationMs) {
+          // Close current block
+          blocks.push({
+            startTime: currentBlockStart,
+            endTime: new Date(currentBlockStart.getTime() + this.config.sessionDurationMs),
+            entries: currentBlockEntries,
+            actualEndTime: currentBlockEntries[currentBlockEntries.length - 1].timestamp
+          });
+          
+          // Start new block (floored to hour)
+          currentBlockStart = this.floorToHour(entry.timestamp);
+          currentBlockEntries = [entry];
+        } else {
+          // Add to current block
+          currentBlockEntries.push(entry);
+        }
+      }
+    }
+    
+    // Close the last block
+    if (currentBlockStart && currentBlockEntries.length > 0) {
+      blocks.push({
+        startTime: currentBlockStart,
+        endTime: new Date(currentBlockStart.getTime() + this.config.sessionDurationMs),
+        entries: currentBlockEntries,
+        actualEndTime: currentBlockEntries[currentBlockEntries.length - 1].timestamp
+      });
+    }
+    
+    return blocks;
+  }
+  
+  // Check if current block is active
+  checkActiveBlock() {
+    const blocks = this.identifySessionBlocks();
+    if (blocks.length === 0) {
+      return null;
+    }
+    
+    const lastBlock = blocks[blocks.length - 1];
+    const now = new Date();
+    
+    // Block is active if:
+    // 1. Time since last activity < session duration
+    // 2. Current time < block end time
+    const timeSinceLastActivity = now.getTime() - lastBlock.actualEndTime.getTime();
+    const isActive = timeSinceLastActivity < this.config.sessionDurationMs && 
+                     now < lastBlock.endTime;
+    
+    return {
+      isActive,
+      lastBlock,
+      timeSinceLastActivity
+    };
+  }
+
+  // Activate new block by running Claude command
+  activateBlock() {
+    try {
+      this.log('info', 'Activating new Claude billing block...');
+      
+      const command = `${this.config.claudeCommand} "${this.config.activationCommand}"`;
+      this.log('verbose', `Executing command: ${command}`);
+      
+      // Set up environment with proxy if configured
+      const env = { ...process.env };
+      if (this.config.proxy) {
+        env.HTTP_PROXY = this.config.proxy;
+        env.HTTPS_PROXY = this.config.proxy;
+        env.http_proxy = this.config.proxy;
+        env.https_proxy = this.config.proxy;
+        this.log('verbose', `Using proxy: ${this.config.proxy}`);
+      }
+      
+      const output = execSync(command, { 
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: 'pipe',
+        env: env
+      });
+      
+      // Always show Claude command output to preserve it in logs
+      if (output && output.trim()) {
+        this.log('info', 'Claude command output:');
+        console.log(output);
+      }
+      
+      this.log('info', '✅ Claude billing block activated successfully');
+      return true;
+    } catch (err) {
+      this.log('error', `❌ Failed to activate Claude billing block: ${err.message}`);
+      
+      // Show error output if available
+      if (err.stdout) {
+        this.log('error', 'Command stdout:');
+        console.log(err.stdout);
+      }
+      if (err.stderr) {
+        this.log('error', 'Command stderr:');
+        console.log(err.stderr);
+      }
+      return false;
+    }
+  }
+
+  // Main execution logic
+  run() {
+    try {
+      const blockStatus = this.checkActiveBlock();
+      
+      if (!blockStatus) {
+        this.log('info', '❌ No Claude activity found, activating new billing block');
+        this.activateBlock();
+        return;
+      }
+      
+      const { isActive, lastBlock, timeSinceLastActivity } = blockStatus;
+      
+      // Format times for display
+      const activityTime = lastBlock.actualEndTime;
+      const timeString = this.formatTime(activityTime);
+      
+      const blockStartTime = lastBlock.startTime;
+      const blockStartString = this.formatTime(blockStartTime);
+      
+      const blockEndTime = lastBlock.endTime;
+      const blockEndString = this.formatTime(blockEndTime);
+      
+      // Calculate remaining time in block
+      const now = new Date();
+      const remainingTime = blockEndTime.getTime() - now.getTime();
+      const remainingMinutes = Math.max(0, Math.floor(remainingTime / (1000 * 60)));
+      
+      // Show block details in verbose mode
+      if (this.config.logLevel === 'verbose') {
+        this.log('verbose', `Block details:`);
+        this.log('verbose', `  Start time: ${this.formatTimestamp(blockStartTime)}`);
+        this.log('verbose', `  End time: ${this.formatTimestamp(blockEndTime)}`);
+        this.log('verbose', `  Last activity: ${this.formatTimestamp(activityTime)}`);
+        this.log('verbose', `  Entries in block: ${lastBlock.entries.length}`);
+        this.log('verbose', `  Time since last activity: ${Math.floor(timeSinceLastActivity / (1000 * 60))} minutes`);
+      }
+      
+      if (isActive) {
+        this.log('info', `✅ Claude billing block is active (${blockStartString}-${blockEndString})`);
+        this.log('info', `   Last activity: ${timeString}, ${remainingMinutes} minutes remaining`);
+      } else {
+        // Determine why block is not active
+        if (now >= blockEndTime) {
+          this.log('info', `⏰ Claude billing block expired (${blockStartString}-${blockEndString})`);
+        } else {
+          this.log('info', `⏰ Claude billing block inactive (no activity for ${Math.floor(timeSinceLastActivity / (1000 * 60))} minutes)`);
+        }
+        this.log('info', `   Last activity: ${timeString}, activating new billing block`);
+        this.activateBlock();
+      }
+    } catch (err) {
+      this.log('error', `❌ CC Keeper execution failed: ${err.message}`);
+      process.exit(1);
+    }
+  }
+  
+}
+
+class CronScheduler {
+  constructor(cronExpression = '30 0,4-23 * * *') {
+    this.cronExpression = cronExpression;
+    
+    // Initialize cron parser interval
+    try {
+      const parser = cronParser.CronExpressionParser || cronParser.default || cronParser;
+      this.interval = parser.parse(this.cronExpression);
+    } catch (err) {
+      throw new Error(`Invalid cron expression: ${err.message}`);
+    }
+  }
+
+  // Calculate seconds until next run
+  calculateNextRun() {
+    try {
+      // Reinitialize interval to get fresh next run time
+      const parser = cronParser.CronExpressionParser || cronParser.default || cronParser;
+      this.interval = parser.parse(this.cronExpression);
+      const now = new Date();
+      const next = this.interval.next().toDate();
+      const secondsUntilNext = Math.floor((next.getTime() - now.getTime()) / 1000);
+      
+      // Ensure minimum delay of 1 second
+      return Math.max(1, secondsUntilNext);
+    } catch (err) {
+      // If we can't calculate next run, default to 1 hour
+      console.error(`Error calculating next run: ${err.message}`);
+      return 3600;
+    }
+  }
+
+  // Get next run time as Date object
+  getNextRunTime() {
+    try {
+      // Reinitialize interval to get fresh next run time
+      const parser = cronParser.CronExpressionParser || cronParser.default || cronParser;
+      this.interval = parser.parse(this.cronExpression);
+      return this.interval.next().toDate();
+    } catch (err) {
+      // Default to 1 hour from now if error
+      return new Date(Date.now() + 3600 * 1000);
+    }
+  }
+  
+  // Validate cron expression
+  static isValidCron(expression) {
+    try {
+      const parser = cronParser.CronExpressionParser || cronParser.default || cronParser;
+      parser.parse(expression);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+}
+
+class CcKeeper {
+  constructor(args = [], forceMode = false) {
+    this.keeper = new ClaudeKeeper(args);
+    // Override forceMode if passed from CLI
+    if (forceMode) {
+      this.keeper.config.forceMode = true;
+    }
+    
+    // Create scheduler with proper error handling
+    try {
+      this.scheduler = new CronScheduler(this.keeper.config.schedule);
+    } catch (err) {
+      this.keeper.log('error', `Invalid cron expression: ${err.message}`);
+      process.exit(1);
+    }
+    
+    this.running = false;
+    this.setupSignalHandlers();
+    
+    // Log all configuration values at startup
+    this.logConfiguration();
+  }
+
+  logConfiguration() {
+    this.keeper.log('info', 'CC Keeper Configuration:');
+    this.keeper.log('info', `  Session Duration: ${this.keeper.config.sessionDuration} minutes (${Math.floor(this.keeper.config.sessionDuration / 60)} hours)`);
+    this.keeper.log('info', `  Claude Command: ${this.keeper.config.claudeCommand}`);
+    this.keeper.log('info', `  Activation Command: ${this.keeper.config.activationCommand}`);
+    this.keeper.log('info', `  Log Level: ${this.keeper.config.logLevel}`);
+    this.keeper.log('info', `  Proxy: ${this.keeper.config.proxy || 'none'}`);
+    this.keeper.log('info', `  Force Mode: ${this.keeper.config.forceMode}`);
+    this.keeper.log('info', `  Schedule: ${this.keeper.config.schedule}`);
+    this.keeper.log('info', '');
+  }
+
+  setupSignalHandlers() {
+    process.on('SIGTERM', () => {
+      this.keeper.log('info', '🛑 Received SIGTERM, shutting down CC Keeper gracefully...');
+      this.running = false;
+      process.exit(0);
+    });
+
+    process.on('SIGINT', () => {
+      this.keeper.log('info', '🛑 Received SIGINT, shutting down CC Keeper gracefully...');
+      this.running = false;
+      process.exit(0);
+    });
+  }
+
+  async sleep(seconds) {
+    return new Promise(resolve => setTimeout(resolve, seconds * 1000));
+  }
+
+  async runDaemon() {
+    this.running = true;
+    
+    this.keeper.log('info', `🔄 Starting CC Keeper Daemon (PID: ${process.pid})`);
+    console.log('');
+
+    while (this.running) {
+      try {
+        // Run the keeper
+        console.log('\n\n\n');
+        this.keeper.log('info', 'Running CC Keeper check...');
+        
+        // Run keeper logic
+        const forceMode = this.keeper.config.forceMode;
+        if (forceMode) {
+          this.keeper.activateBlock();
+        } else {
+          this.keeper.run();
+        }
+        
+        this.keeper.log('info', 'CC Keeper check completed');
+        
+        if (!this.running) break;
+        
+        // Calculate next run
+        const sleepSeconds = this.scheduler.calculateNextRun();
+        const nextRunTime = this.scheduler.getNextRunTime();
+        const nextRunStr = this.keeper.formatTimestamp(nextRunTime);
+        
+        this.keeper.log('info', `Sleeping ${sleepSeconds}s until next run: ${nextRunStr}`);
+        
+        // Sleep with periodic checks for shutdown
+        const sleepInterval = Math.min(sleepSeconds, 60); // Check every minute max
+        let remainingSleep = sleepSeconds;
+        
+        while (remainingSleep > 0 && this.running) {
+          const currentSleep = Math.min(sleepInterval, remainingSleep);
+          await this.sleep(currentSleep);
+          remainingSleep -= currentSleep;
+        }
+        
+      } catch (err) {
+        this.keeper.log('error', `❌ Daemon error: ${err.message}`);
+        if (!this.running) break;
+        
+        // Wait a bit before retrying
+        await this.sleep(60);
+      }
+    }
+    
+    this.keeper.log('info', '🛑 CC Keeper Daemon stopped');
+  }
+
+  runOneShot(force = false) {
+    this.keeper.log('info', 'CC Keeper starting...');
+    if (force) {
+      this.keeper.activateBlock();
+    } else {
+      this.keeper.run();
+    }
+  }
+
+}
+
+// Check if cckeeper is already running
+function checkIfAlreadyRunning() {
+  try {
+    // Get current process name and arguments
+    const currentPid = process.pid;
+    
+    // Use ps to find processes with node ./cckeeper (actual cckeeper processes)
+    const psOutput = execSync('ps aux', { encoding: 'utf8' });
+    const lines = psOutput.split('\n');
+    
+    let runningProcesses = 0;
+    for (const line of lines) {
+      // Skip the header line and empty lines
+      if (!line || line.includes('USER') || line.includes('PID')) continue;
+      
+      // Look for actual node cckeeper processes (not shell processes that mention cckeeper)
+      if ((line.includes('node ./cckeeper') || line.includes('node cckeeper')) && 
+          !line.includes('ps aux') && !line.includes('grep')) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[1]);
+        
+        // Skip current process
+        if (pid === currentPid) continue;
+        
+        runningProcesses++;
+      }
+    }
+    
+    return runningProcesses > 0;
+  } catch (err) {
+    // If we can't check, assume it's not running
+    return false;
+  }
+}
+
+// CLI interface
+function main() {
+  const args = process.argv.slice(2);
+  
+  // Check if already running (skip for help and one-shot force mode)
+  const isDaemon = args.includes('--daemon') || args.includes('-d');
+  const isHelp = args.includes('--help') || args.includes('-h');
+  const isForce = args.includes('--force') || args.includes('-f');
+  
+  if (!isHelp && (isDaemon || !isForce)) {
+    if (checkIfAlreadyRunning()) {
+      console.log('CC Keeper is already running. Exiting.');
+      process.exit(0);
+    }
+  }
+  
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`
+CC Keeper - Combined Claude Code Block Keeper & Daemon
+
+Usage:
+  cckeeper [options]         Check and activate if needed (one-shot)
+  cckeeper -d [options]      Run in daemon mode with scheduling
+  cckeeper -f [options]      Force activate new block
+  cckeeper -f -d [options]   Run daemon in force mode
+  cckeeper --help            Show this help
+  
+Options:
+  -d, --daemon               Run in daemon mode
+  -f, --force                Force activate without checking
+  --session-duration <min>   Block duration in minutes (default: 300 = 5 hours)
+  --claude-command <cmd>     Path to claude command (default: "claude --model Sonnet")
+  --activation-command <cmd> Command to activate block (default: "1+1")
+  --log-level <level>        Log level: silent, info, verbose (default: "info")
+  --proxy <url>              HTTP proxy URL (example: http://proxy.company.com:8080)
+  --schedule <cron>          Cron expression for daemon mode (default: "30 0,4-23 * * *")
+
+Daemon Mode:
+  In daemon mode, cckeeper runs continuously according to the schedule.
+  Default schedule runs at minute 30 of hours 0,4-23 (every hour except 1-3 AM).
+  
+  Now supports standard cron expressions with full pattern matching:
+  
+  Common cron patterns:
+  - "0 * * * *"          - Every hour at minute 0
+  - "*/15 * * * *"       - Every 15 minutes
+  - "30 9-17 * * *"      - Every hour from 9 AM to 5 PM at minute 30
+  - "0,30 * * * *"       - Every 30 minutes
+  - "15 0,6,12,18 * * *" - At 12:15 AM, 6:15 AM, 12:15 PM, 6:15 PM
+  - "0 9 * * 1-5"        - Every weekday at 9 AM
+  - "*/5 * * * *"        - Every 5 minutes
+  - "0 0 1 * *"          - First day of every month at midnight
+
+Examples:
+  ./cckeeper                                    # Run once
+  ./cckeeper -d                                 # Run as daemon
+  ./cckeeper -f                                 # Force activate new block
+  ./cckeeper -f -d                              # Run daemon in force mode
+  ./cckeeper --session-duration 120           # Use 2-hour blocks
+  ./cckeeper -d --schedule "0 9-17 * * *"       # Run every hour 9 AM to 5 PM
+  ./cckeeper --proxy http://proxy:8080          # Use HTTP proxy
+  nohup ./cckeeper -d &                         # Run daemon in background
+
+More info: https://github.com/user/cckeeper
+`);
+    return;
+  }
+
+  // Parse flags (already declared above for the check)
+  
+  const cckeeper = new CcKeeper(args, isForce);
+  
+  if (isDaemon) {
+    cckeeper.runDaemon();
+  } else {
+    // One-shot mode
+    cckeeper.runOneShot(isForce);
+  }
+}
+
+// Error handling
+process.on('uncaughtException', (err) => {
+  const timestamp = new Date().toISOString().replace(/[TZ]/g, ' ').trim();
+  console.error(`[${timestamp}] ❌ Uncaught exception: ${err.message}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (err) => {
+  const timestamp = new Date().toISOString().replace(/[TZ]/g, ' ').trim();
+  console.error(`[${timestamp}] ❌ Unhandled rejection: ${err}`);
+  process.exit(1);
+});
+
+// Run if executed directly
+if (require.main === module) {
+  main();
+}

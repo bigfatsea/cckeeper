@@ -1,14 +1,14 @@
 {
-  "name": "claude-keeper",
-  "version": "1.0.0",
+  "name": "cckeeper",
+  "version": "2.0.0",
   "description": "Keep Claude Code billing blocks active automatically",
-  "main": "claude-keeper",
+  "main": "cckeeper",
   "bin": {
-    "claude-keeper": "./claude-keeper"
+    "cckeeper": "./cckeeper"
   },
   "scripts": {
-    "test": "node claude-keeper --help",
-    "start": "node claude-keeper"
+    "test": "node cckeeper --help",
+    "start": "node cckeeper"
   },
   "keywords": [
     "claude",
@@ -25,10 +25,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/claude-keeper.git"
+    "url": "https://github.com/user/cckeeper.git"
   },
   "bugs": {
-    "url": "https://github.com/user/claude-keeper/issues"
+    "url": "https://github.com/user/cckeeper/issues"
   },
-  "homepage": "https://github.com/user/claude-keeper#readme"
+  "homepage": "https://github.com/user/cckeeper#readme",
+  "dependencies": {
+    "cron-parser": "^5.3.0"
+  }
 }

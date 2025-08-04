@@ -632,8 +632,7 @@ function checkIfAlreadyRunning() {
       if (!line || line.includes('USER') || line.includes('PID')) continue;
       
       // Look for actual node cckeeper processes (not shell processes that mention cckeeper)
-      if ((line.includes('node ./cckeeper') || line.includes('node cckeeper')) && 
-          !line.includes('ps aux') && !line.includes('grep')) {
+      if (line.includes('cckeeper') && !line.includes('ps aux') && !line.includes('grep')) {
         const parts = line.trim().split(/\s+/);
         const pid = parseInt(parts[1]);
         
